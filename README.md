@@ -95,14 +95,34 @@ Ordering service为Client和Peer提供了一个共享的通信通道, 为包含�
 
 *分区Partitioning* (Ordering service channels)。Ordering service可能支持多个channels, 类似于发布/订阅 (pub/sub) 信息系统的*topics*。Client可以连接到给定的channel, 然后可以发送消息并获取到达的消息。channel可以被认为是分区-连接到一个通道的客户端不知道其他通道的存在, 但客户端可以连接到多个通道。尽管 Hyperledger 结构中包含的一些Ordering service实现支持多个通道, 但为了简单起见, 在本文的其余部分中, 我们假定Ordering service由单个通道/主题组成。
 
-**Ordering service API**。Peer通过Ordering service提供的接口连接到Ordering service提供的channel通道。Ordering service API 由两个基本操作 (通常是异步事件) 组成:
+#### **Ordering service API**
+
+Peer通过Ordering service提供的接口连接到Ordering service提供的channel通道。Ordering service API 由两个基本操作 (通常是异步事件) 组成:
 
 1. **TODO** 添加用于在Client/Peer指定序列号下获取特定Block的 API 部分。
 
     - `broadcast(blob-数据块的二进制形式)`: Client调用此项来广播任意消息 `blob` 以在channel上传播。向服务发送请求时，也在BFT-二进制文件传输（Binary File Transfer）环境中被称为`request(blob)`
     - `deliver(seqno, prevhash, blob)`: orderer 在Peer上调用此功能来传递消息，以便使用指定的非负整数序列号（seqno）和最近交付的blob（prevhash）的散列来传递消息blob。换句话说，它是来自Ordering service的输出事件。 deliver（）有时也被称为pub-sub系统中的notify()或BFT-二进制文件传输（Binary File Transfer）系统中的commit()。
 
+#### Ledger 和形成区块
+
+通过一系列事件，`deliver(seqno, prevhash, blob)`其中 prevhash 来自于上一个区块。
+
+#### Ordering 服务的属性
+
+1. 安全性（持续保证）
+
+2. 活跃性（传输保证）
+
+## 交易流程
+
+## 2.1 客户端创立一笔交易和将它发送到所选择的背书节点
+
+Invoke 一笔交易，客户端发送一条 PROPOSE 消息选择一组认可的peers，对于给定chaincodeID的一组 endorsing peers 经由peer而被提供给客户机，该peer又从认可政策中知道一组标识peer
+
 ## 交易流
+
+为了确保数据的一致性和完整性，Hyperledger Fabric在整个交易流程中实施了多个检查点，包括客户端认证-`client authentication`，背书-`endorsement`，`ordering`和对ledger的承诺。
 
 在这个场景中假设有两个客户，A和B，在进行橙子买卖。这两个客户各自有自己的网络节点（Peer），通过他们的节点发送交易并且和账本进行互动。
 
@@ -120,4 +140,26 @@ Ordering service为Client和Peer提供了一个共享的通信通道, 为包含�
 
 接下来这个交易提案被构建。利用受支持的SDK（Node，Java，Python）的应用程序，会用生成交易提议的可用API之一。该提议是调用chaincode代码的函数，以便数据可以被读取/写入账本（即为资产编写新的键值对）的请求。 SDK可用作将交易提议打包为正确架构的格式（通过gRPC的协议缓冲区）并采用用户的加密凭证为此交易提议生成唯一签名。
 
-### 2. 赞成节点验证的签名并且执行这笔交易
+### 2. 赞成peer节点验证的签名并且执行这笔交易
+
+Endorsing peers要验证 (1) 交易提交格式良好, (2) 以前尚未提交 (重播攻击保护), (3) 签名有效 (使用 MSP), (4) (如示例中的客户端 A) 已正确授权在该通道上执行建议的操作 (即, 每个Endorsing peers都确保提交者满足信道的编写者策略)。
+
+Endorsing peers将transaction proposal输入作为参数提供给调用的 chaincode 函数。然后, 对当前状态数据库执行 chaincode, 以生成包括响应值、读集和写集在内的事务结果。此时未对ledger进行更新。这些值的集合以及Endorsing peers的签名将作为 'proposal response' 传递给 SDK, 分析要使用的应用程序的有效负载。
+
+>MSP是一个peer组件，它允许同行验证来自client的交易请求并签署交易结果（endorsements）。书写策略在频道创建时定义，并确定哪些用户有权向该频道提交交易。
+
+### 3. 对proposal response的检查
+
+应用程序验证Endorsing peers签名并比较proposal response, 以确定方案响应是否相同。如果 chaincode 只查询ledger, 则应用程序将检查查询响应, 通常不会将事务提交到ordering服务。如果客户端应用程序打算将事务提交到ordering服务以更新ledger, 则应用程序将确定, 指定的背书策略在提交前是否已完成 (即peerA 和 peerB 都认可)。体系结构是这样的, 即使应用程序选择不检查响应或以其他方式转发 unendorsed 事务, 背书策略仍将由peer执行, 并在提交验证阶段得到维护。
+
+### 4. Client将背书组装成交易
+
+应用程序将“交易消息”中的交易提议和响应“广播”给 Ordering Service。该事务将包含读/写集，the endorsing peers签名和通道ID。Ordering Service不需要检查交易的全部内容以便执行其操作，它仅接收来自网络中所有channel的交易，按channel按时间顺序排序，并为每个channel创建交易块。
+
+### 5. 交易已经过验证并提交
+
+交易的区块被“delivered”给channel上的所有peer。对区块中的交易进行验证，以确保批注策略得到满足，并确保读取集变量的分类账状态没有变化，因为读取集是由事务执行生成的。块中的事务被标记为有效或无效。
+
+### 6. 账本更新
+
+每个peer将块追加到通道的链中, 对于每个有效交易, 写入集都提交到当前状态数据库。发出事件, 通知客户端应用程序将交易 (调用) 一成不变追加到链中, 并通知该事务是否已验证或无效。
